@@ -1,12 +1,22 @@
-from hata import Client
+from hata import Client, Message, Embed
 import json
 from hata.ext.commands import setup_ext_commands
-from character import Character
+from character import *
+from hata import KOKORO, Lock, enter_executor
 
+import cattr
+
+FILE_LOCK = Lock(KOKORO)
 
 secrets = json.load(open('secrets.json'))
 Faito = Client(secrets['token'])
 setup_ext_commands(Faito, '!')
+# dictionary pointing user.id -> character
+characters = {}
+# list of battles
+battles = []
+battle_locks = []
+characters_lock = Lock(KOKORO)
 
 
 @Faito.events
@@ -19,86 +29,124 @@ async def ping(client, message):
     await client.message_create(message.channel, 'pong')
 
 
-from hata import KOKORO, Lock, enter_executor
-FILE_LOCK = Lock(KOKORO)
-
 @Faito.commands
 async def signup(client, message):
+    global characters
     if message.author.is_bot:
         return
 
-    async with FILE_LOCK:
-        async with enter_executor():
+    async with characters_lock:
+        if message.author.id in characters:
+            await client.message_create(message.channel, 'You already signed up silly!')
+        new_character = Character.from_id(message.author.id)
+        characters[message.author.id] = new_character
+        await client.message_create(message.channel, f"Created a new user: {new_character}")
 
-            with open('data.json', 'r') as jsonFile:
-                data = json.load(jsonFile)
-
-            if str(message.author.id) in data["players"]:
-                previously_signed_up = True
-            else:
-                previously_signed_up = False
-                new_character = Character(message.author.id)
-                data["players"][str(message.author.id)] = new_character.json_stats()
-
-            with open('data.json', 'w') as jsonFile:
-                json.dump(data, jsonFile)
-
-    # the await here seems to have to be outside the FILE_LOCK & enter_executor asyncs above (not sure why)
-    if previously_signed_up:
-        await client.message_create(message.channel, 'You already signed up silly!')
-
-
-
-
-import signal
-from threading import main_thread
-from hata import CLIENTS
-import os
-import threading
-sigmap = {signal.SIGINT: signal.CTRL_C_EVENT,
-              signal.SIGBREAK: signal.CTRL_BREAK_EVENT}
-
-def kill(pid, signum):
-        if signum in sigmap and pid == os.getpid():
-            # we don't know if the current process is a
-            # process group leader, so just broadcast
-            # to all processes attached to this console.
-            pid = 0
-        thread = threading.current_thread()
-        handler = signal.getsignal(signum)
-        # work around the synchronization problem when calling
-        # kill from the main thread.
-        if (signum in sigmap and
-            thread.name == 'MainThread' and
-            callable(handler) and
-            pid == 0):
-            event = threading.Event()
-            def handler_set_event(signum, frame):
-                event.set()
-                return handler(signum, frame)
-            signal.signal(signum, handler_set_event)                
-            try:
-                os.kill(pid, sigmap[signum])
-                # busy wait because we can't block in the main
-                # thread, else the signal handler can't execute.
-                while not event.is_set():
-                    pass
-            finally:
-                signal.signal(signum, handler)
-        else:
-            os.kill(pid, sigmap.get(signum, signum))
 
 @Faito.commands
-async def shutdown(client, message):
-    
-    for client_ in CLIENTS:
-        await client_.disconnect()
-    
-    await client.message_create(message.channel, 'Clients stopped, stopping process.')
-    client.loop.stop()
-    thread_id = main_thread().ident
+async def battle(client: Client, msg: Message):
+    """
+    Initiate a battle with a selected opponent
+    :param client:
+    :param msg:
+    :return:
+    """
+    global characters, battles
+    async with characters_lock:
+        # just making sure no one is modifying the characters atm
+        if msg.author.id not in characters:
+            await client.message_create(msg.channel, "Create a character first please")
+            return
+        print(f'user mentions: {msg.user_mentions}')
+        if len(msg.user_mentions) != 1:
+            await client.message_create(msg.channel, "Mention a single user to start the battle with")
+            return
+        mentioned_user = msg.user_mentions[0]
+        if mentioned_user.id not in characters:
+            await client.message_create(msg.channel, "Make sure the opponent also has a user please")
+            return
+        new_battle = Battle.from_participants([characters[msg.author.id], characters[mentioned_user.id]])
+        # todo make sure that we don't have an ongoing battle and all those edge cases
+        battles.append(new_battle)
+        embed = Embed(title="Battle started!", description=f"{msg.author.name} has challenged {mentioned_user.id} to "
+                                                           f"a battle! May the best player win!")
+        await client.message_create(msg.channel, embed=embed)
+    await client.message_create()
 
-    kill(thread_id, signal.SIGTERM)
+
+# todo add cooldown per user
+@Faito.commands
+async def move(client, msg):
+    """
+    During a battle, do a move against the opponent
+    :param client:
+    :param msg:
+    :return:
+    """
+    pass
 
 
-Faito.start()
+@Faito.commands
+async def reset(client, msg):
+    """
+    Reset the system (for ease of testing)
+    :param client:
+    :param msg:
+    :return:
+    """
+    pass
+
+
+@Faito.commands
+async def save(client: Client, msg: Message):
+    """
+    Load the JSON
+    :param client:
+    :param msg:
+    :return:
+    """
+    global characters
+    async with characters_lock:
+        with open('characters.json', 'w') as f:
+            print(cattr.unstructure(characters))
+            json.dump(cattr.unstructure(characters), f)
+            await client.message_create(msg.channel, "Successfully saved the characters")
+
+
+@Faito.commands
+async def load(client: Client, msg: Message):
+    """
+    Load the JSON
+    :param client:
+    :param msg:
+    :return:
+    """
+    global characters
+    async with characters_lock:
+        with open('characters.json') as f:
+            data = json.load(f)
+            characters = {k: cattr.structure(v, Character)
+                          for k, v in data.items()}
+            await client.message_create(msg.channel, "Successfully loaded the characters")
+
+
+@Faito.commands
+async def stats(client: Client, msg: Message):
+    """
+    Send the user's statistics
+    :param client:
+    :param msg:
+    :return:
+    """
+    user = msg.author
+    print(user.id)
+    # todo get the actual stats
+    stats = characters[msg.author.id]
+    embed = Embed(title=f'Stats for {user.name}',
+                  description="\n".join([f'{k.upper()}: {v}' for k, v in stats.items()]))
+    await client.message_create(msg.channel,
+                                embed=embed)
+
+
+if __name__ == '__main__':
+    Faito.start()
