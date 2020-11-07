@@ -1,11 +1,13 @@
 from hata import Client
 import json
 from hata.ext.commands import setup_ext_commands
+from character import Character
 
 
 secrets = json.load(open('secrets.json'))
 Faito = Client(secrets['token'])
 setup_ext_commands(Faito, '!')
+
 
 @Faito.events
 async def ready(client):
@@ -15,6 +17,37 @@ async def ready(client):
 @Faito.commands
 async def ping(client, message):
     await client.message_create(message.channel, 'pong')
+
+
+from hata import KOKORO, Lock, enter_executor
+FILE_LOCK = Lock(KOKORO)
+
+@Faito.commands
+async def signup(client, message):
+    if message.author.is_bot:
+        return
+
+    async with FILE_LOCK:
+        async with enter_executor():
+
+            with open('data.json', 'r') as jsonFile:
+                data = json.load(jsonFile)
+
+            if str(message.author.id) in data["players"]:
+                previously_signed_up = True
+            else:
+                previously_signed_up = False
+                new_character = Character(message.author.id)
+                data["players"][str(message.author.id)] = new_character.json_stats()
+
+            with open('data.json', 'w') as jsonFile:
+                json.dump(data, jsonFile)
+
+    # the await here seems to have to be outside the FILE_LOCK & enter_executor asyncs above (not sure why)
+    if previously_signed_up:
+        await client.message_create(message.channel, 'You already signed up silly!')
+
+
 
 
 import signal
